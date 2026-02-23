@@ -146,7 +146,9 @@ copy /Y "$(ProjectDir)libs\libcrypto-3-x64.dll" "$(TargetDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="dllkd.h" />
     <ClInclude Include="framework.h" />
+    <ClInclude Include="hasp_api.h" />
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
