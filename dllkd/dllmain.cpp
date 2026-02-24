@@ -19,6 +19,8 @@
 
 #define CHUNK 4096
 
+#define KEYPATH R"(C:\Program Files (x86)\IGS\z.bin)"
+
 #pragma warning(disable:4996)
 
 
@@ -233,7 +235,7 @@ int ReadKeyEnc(BYTE *KeyEncrypt, DWORD KeyEncryptLen) {
 
 	int rtn = 0;
 
-	rtn = ReadFromFile(R"(C:\Program Files (x86)\IGS\z.bin)", KeyEncrypt, KeyEncryptLen);
+	rtn = ReadFromFile(KEYPATH, KeyEncrypt, KeyEncryptLen);
 	if (rtn != 0) {
 		return -1;
 	}
@@ -244,6 +246,7 @@ int ReadKeyEnc(BYTE *KeyEncrypt, DWORD KeyEncryptLen) {
 int GetKey(BYTE *Key, DWORD *KeyLen) {
 
 	int rtn = 0;
+	int i = 0;
 
 	BYTE KeyPlain[48] = { 0x00 };
 	BYTE KeyEncrypt[48] = { 0x00 };
@@ -264,8 +267,17 @@ int GetKey(BYTE *Key, DWORD *KeyLen) {
 
 
 	BYTE Area[32] = { 0x00 };
-	rtn = ReadFromKeypro(Area, sizeof(Area), 0);
-	if(rtn != 0) {
+	//與Keypro通訊加入Retry 3次機制
+	for (i = 0; i < 3; i++) {
+		rtn = ReadFromKeypro(Area, sizeof(Area), 0);
+		if (rtn != 0) {
+			Sleep(3000);
+			continue;
+		}
+		break;
+	}
+
+	if(i == 3) {
 		return -READ_KEYPRO_FAILED;
 	}
 
@@ -274,10 +286,19 @@ int GetKey(BYTE *Key, DWORD *KeyLen) {
 	}
 
 	BYTE GameData[32] = { 0x00 };
-	rtn = ReadFromKeypro(GameData, sizeof(GameData), 32);
-	if (rtn != 0) {
+	//與Keypro通訊加入Retry 3次機制
+	for (i = 0; i < 3; i++) {
+		rtn = ReadFromKeypro(GameData, sizeof(GameData), 32);
+		if (rtn != 0) {
+			Sleep(3000);
+			continue;
+		}
+		break;
+	}
+	if (i == 3) {
 		return -READ_KEYPRO_FAILED;
 	}
+
 
 	BYTE Mix[64] = { 0x00 };
 	memcpy(Mix, Area, sizeof(Area));
