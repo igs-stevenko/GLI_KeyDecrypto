@@ -11,6 +11,7 @@ enum {
 	READ_KEYPRO_FAILED,
 	DEC_KEY_FAILED,
 	READ_REG_FAILED,
+	KEY_SIZE_ERROR,
 	AREA_NOT_MATCH,
 };
 
@@ -24,7 +25,15 @@ enum {
 extern "C" {
 #endif
 
-	KEYLIB_API int GetKey(BYTE* Key, DWORD* KeyLen);
+	/* 參數 :
+		Key : 取得Key的buffer，要有32bytes的大小 
+	   
+	   回傳值 :
+		0 : 成功
+		< 0 : 失敗
+	   
+	 */
+	KEYLIB_API int GetKey(BYTE* Key);
 
 #ifdef __cplusplus
 }

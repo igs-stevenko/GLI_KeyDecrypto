@@ -243,7 +243,7 @@ int ReadKeyEnc(BYTE *KeyEncrypt, DWORD KeyEncryptLen) {
 	return rtn;
 }
 
-int GetKey(BYTE *Key, DWORD *KeyLen) {
+int GetKey(BYTE *Key) {
 
 	int rtn = 0;
 	int i = 0;
@@ -314,7 +314,9 @@ int GetKey(BYTE *Key, DWORD *KeyLen) {
 		return -DEC_KEY_FAILED;
 	}
 
-	*KeyLen = KeyPlainLen;
+	if (KeyPlainLen != 32) {
+		return -KEY_SIZE_ERROR;
+	}
 
 	memcpy(Key, KeyPlain, KeyPlainLen);
 
