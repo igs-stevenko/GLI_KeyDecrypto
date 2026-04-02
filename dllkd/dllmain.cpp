@@ -14,16 +14,25 @@
 #include <commctrl.h>
 #include <thread>
 #include <openssl/sha.h>
+#include <setupapi.h>
+#include <devguid.h>
+#include <winioctl.h>
+#include <aclapi.h>
 #include "dllkd.h"
 #include "hasp_api.h"
 
-#define CHUNK 4096
-
-#define KEYPATH R"(C:\Program Files (x86)\IGS\z.bin)"
-
 #pragma warning(disable:4996)
+#pragma comment(lib, "setupapi.lib")
 
+#define CHUNK 4096
+#define KEYPATH R"(C:\Program Files (x86)\IGS\z.bin)"
+#define X_IMG_NAME "x.img"
+#define SETTING_FILE "Setting.bin"
 
+enum {
+	USB_STORAGE_DETECTED = 0,
+	USB_STORAGE_NOT_DETECTED,
+};
 
 BOOL APIENTRY DllMain( HMODULE hModule,
                        DWORD  ul_reason_for_call,
@@ -41,7 +50,7 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     return TRUE;
 }
 
-void print_hex(unsigned char* buf, int len) {
+void PrintHex(unsigned char* buf, int len) {
 
 	int i = 0;
 	for (i = 0; i < len; i++) {
@@ -50,6 +59,254 @@ void print_hex(unsigned char* buf, int len) {
 	}
 }
 
+uint32_t Crc32(const uint8_t* data, size_t length) {
+	uint32_t crc = 0xFFFFFFFF;
+
+	for (size_t i = 0; i < length; i++) {
+		crc ^= data[i];
+
+		for (int j = 0; j < 8; j++) {
+			if (crc & 1)
+				crc = (crc >> 1) ^ 0xEDB88320;
+			else
+				crc >>= 1;
+		}
+	}
+
+	return ~crc;
+}
+
+bool FileExists(const char* FilePath)
+{
+
+	if (!FilePath) {
+		return false;
+	}
+
+	DWORD attr = GetFileAttributesA(FilePath);
+
+	if (attr == INVALID_FILE_ATTRIBUTES)
+	{
+		//printf("Error Code: %lu\n", GetLastError());
+		return false;
+	}
+
+	return !(attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+bool IsUpdateStorage(BYTE* Path){
+
+	BYTE FilePath[512];
+
+	sprintf((char *)FilePath, "%s:\\%s", Path, X_IMG_NAME);
+
+	return FileExists((const char *)FilePath);
+}
+
+bool GetFirstUSBMountedPath(BYTE* Path)
+{
+	if (!Path)
+		return false;
+
+	HDEVINFO hDevInfo = SetupDiGetClassDevs(
+		&GUID_DEVINTERFACE_DISK,
+		NULL,
+		NULL,
+		DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+
+	if (hDevInfo == INVALID_HANDLE_VALUE)
+		return false;
+
+	SP_DEVICE_INTERFACE_DATA ifData;
+	ifData.cbSize = sizeof(ifData);
+
+	for (DWORD i = 0;
+		SetupDiEnumDeviceInterfaces(
+			hDevInfo, NULL,
+			&GUID_DEVINTERFACE_DISK,
+			i, &ifData);
+		i++)
+	{
+		DWORD requiredSize = 0;
+		SetupDiGetDeviceInterfaceDetail(
+			hDevInfo, &ifData,
+			NULL, 0,
+			&requiredSize, NULL);
+
+		PSP_DEVICE_INTERFACE_DETAIL_DATA detail =
+			(PSP_DEVICE_INTERFACE_DETAIL_DATA)malloc(requiredSize);
+
+		if (!detail) continue;
+
+		detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+
+		if (SetupDiGetDeviceInterfaceDetail(
+			hDevInfo, &ifData,
+			detail, requiredSize,
+			NULL, NULL))
+		{
+			HANDLE hDisk = CreateFile(
+				detail->DevicePath,
+				0,
+				FILE_SHARE_READ | FILE_SHARE_WRITE,
+				NULL,
+				OPEN_EXISTING,
+				0,
+				NULL);
+
+			if (hDisk != INVALID_HANDLE_VALUE)
+			{
+				STORAGE_PROPERTY_QUERY query = {};
+				query.PropertyId = StorageDeviceProperty;
+				query.QueryType = PropertyStandardQuery;
+
+				BYTE buffer[1024];
+				DWORD bytes;
+
+				if (DeviceIoControl(
+					hDisk,
+					IOCTL_STORAGE_QUERY_PROPERTY,
+					&query,
+					sizeof(query),
+					buffer,
+					sizeof(buffer),
+					&bytes,
+					NULL))
+				{
+					STORAGE_DEVICE_DESCRIPTOR* desc =
+						(STORAGE_DEVICE_DESCRIPTOR*)buffer;
+
+					if (desc->Size > sizeof(buffer))
+					{
+						CloseHandle(hDisk);
+						free(detail);
+						continue;
+					}
+
+					if (desc->BusType == BusTypeUsb)
+					{
+						STORAGE_DEVICE_NUMBER number;
+						if (DeviceIoControl(
+							hDisk,
+							IOCTL_STORAGE_GET_DEVICE_NUMBER,
+							NULL, 0,
+							&number,
+							sizeof(number),
+							&bytes,
+							NULL))
+						{
+
+							CloseHandle(hDisk);
+							free(detail);
+							detail = NULL;
+
+							// 現在比對磁碟機字母
+							char drives[512];
+							DWORD len = GetLogicalDriveStringsA(
+								sizeof(drives), drives);
+
+
+							// ⭐ FIX: 檢查長度
+							if (len == 0 || len > sizeof(drives))
+							{
+								SetupDiDestroyDeviceInfoList(hDevInfo);
+								return false;
+							}
+
+							char* drive = drives;
+							while (*drive)
+							{
+								char volumePath[64];
+								sprintf_s(volumePath, sizeof(volumePath),
+									"\\\\.\\%c:",
+									drive[0]);
+
+								HANDLE hVol = CreateFileA(
+									volumePath,
+									0,
+									FILE_SHARE_READ |
+									FILE_SHARE_WRITE,
+									NULL,
+									OPEN_EXISTING,
+									0,
+									NULL);
+
+								if (hVol != INVALID_HANDLE_VALUE)
+								{
+
+									STORAGE_DEVICE_NUMBER volNumber;
+									if (DeviceIoControl(
+										hVol,
+										IOCTL_STORAGE_GET_DEVICE_NUMBER,
+										NULL, 0,
+										&volNumber,
+										sizeof(volNumber),
+										&bytes,
+										NULL))
+									{
+
+										if (volNumber.DeviceNumber ==
+											number.DeviceNumber)
+										{
+
+											*Path = drive[0];
+											if (IsUpdateStorage(Path) == false) {
+												CloseHandle(hVol);
+												SetupDiDestroyDeviceInfoList(
+													hDevInfo);
+												return true;
+											}
+										}
+									}
+									CloseHandle(hVol);
+								}
+								size_t l = strlen(drive);
+								if (l == 0 || l > 10) break;
+
+								drive += l + 1;
+							}
+						}
+					}
+				}
+				CloseHandle(hDisk);
+			}
+		}
+		if(detail)	free(detail);
+	}
+	SetupDiDestroyDeviceInfoList(hDevInfo);
+	return false;
+}
+
+
+/* 執行內容 :
+	偵測是否有USB Storage掛載起來，沒有則回傳USB_STORAGE_NOT_DETECTED
+
+   參數 :
+	參數1.若有USB Storage被掛載起來，則此參數會被放入掛仔的路徑
+
+   回傳值 :
+	  USB_STORAGE_DETECTED : 有USB Storage被掛載起來
+	  USB_STORAGE_NOT_DETECTED : 沒有任何USB Storage被掛載起來
+
+ */
+int DetectUSBStorage(BYTE* MountPath)
+{
+	if (!MountPath) {
+		return -1;
+	}
+
+	BYTE pathBuf[128] = { 0 };
+
+	if (GetFirstUSBMountedPath(pathBuf))
+	{
+		sprintf((char*)MountPath, "%s", pathBuf);
+		return USB_STORAGE_DETECTED;
+	}
+	else
+	{
+		return USB_STORAGE_NOT_DETECTED;
+	}
+}
 
 int Aes256Decrypt(BYTE* Key, BYTE* IV, BYTE* Input, DWORD InputLen, BYTE* Output, DWORD* OutputLen)
 {
@@ -105,20 +362,80 @@ int Aes256Decrypt(BYTE* Key, BYTE* IV, BYTE* Input, DWORD InputLen, BYTE* Output
 	return 0;
 }
 
+int GetSettingFileSize(const char* filename, DWORD* filesize) {
+	
+	if (filename == NULL || filesize == NULL) {
+		return -1;
+	}
+	FILE* fin = fopen(filename, "rb");
+	if (!fin) {
+		return -2;
+	}
+	fseek(fin, 0, SEEK_END);
+	*filesize = ftell(fin);
+	fclose(fin);
+	return 0;
+}
+
 int ReadFromFile(const char* filename, unsigned char* buf, int len) {
 
 	int rtn = 0;
 	FILE* fin = fopen(filename, "rb");
-	if (!fin) return -1;
+	if (!fin) {
+		return -1;
+	}
 
 	rtn = fread(buf, 1, len, fin);
 	if (rtn != len) {
-		rtn = -1;
+		rtn = -2;
 	}
 	else {
 		rtn = 0;
 	}
 
+	fclose(fin);
+
+	return rtn;
+}
+
+int WriteToFile(const char* filename, unsigned char* buf, int len) {
+	
+	int rtn = 0;
+	// 若檔案已存在，先確保移除只讀屬性並刪除，確保後續能覆蓋
+	if (FileExists(filename)) {
+		SetFileAttributesA(filename, FILE_ATTRIBUTE_NORMAL);
+		DeleteFileA(filename);
+	}
+
+	FILE* fout = fopen(filename, "wb");
+	if (!fout) return -1;
+
+	size_t written = fwrite(buf, 1, len, fout);
+	if (written != (size_t)len) {
+		rtn = -2;
+	}
+	else {
+		rtn = 0;
+	}
+
+	fclose(fout);
+
+	// 授予 Everyone 讀取權限
+	EXPLICIT_ACCESSA ea;
+	PACL pNewAcl = NULL;
+	ZeroMemory(&ea, sizeof(EXPLICIT_ACCESSA));
+
+	ea.grfAccessPermissions = GENERIC_READ;
+	ea.grfAccessMode = GRANT_ACCESS;
+	ea.grfInheritance = NO_INHERITANCE;
+	ea.Trustee.TrusteeForm = TRUSTEE_IS_NAME;
+	ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+	ea.Trustee.ptstrName = (LPSTR)"EVERYONE";
+
+	if (SetEntriesInAclA(1, &ea, NULL, &pNewAcl) == ERROR_SUCCESS) {
+		SetNamedSecurityInfoA((LPSTR)filename, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, pNewAcl, NULL);
+		if (pNewAcl) LocalFree(pNewAcl);
+	}
 	return rtn;
 }
 
@@ -245,6 +562,10 @@ int ReadKeyEnc(BYTE *KeyEncrypt, DWORD KeyEncryptLen) {
 
 int GetKey(BYTE *Key) {
 
+	if (Key == NULL) {
+		return -PARAM_ERROR;
+	}
+	
 	int rtn = 0;
 	int i = 0;
 
@@ -323,3 +644,163 @@ int GetKey(BYTE *Key) {
 	return rtn;
 }
 
+int SettingFileWrite(BYTE *Data, DWORD DataLen) {
+
+	if(Data == NULL || DataLen <= 0)
+		return -PARAM_ERROR;
+
+	int rtn = 0;
+	BYTE MountPath[512] = { 0x00 };
+	uint32_t DataCrc32 = { 0x00 };
+	BYTE* DataWrite = NULL;
+	BYTE FilePath[512] = { 0x00 };
+	
+	rtn = DetectUSBStorage(MountPath);
+	if (rtn != 0) {
+		rtn = -USBDISK_NOT_FOUND;
+		goto out;
+	}
+
+	/* 計算Data的crc32 */
+	DataCrc32 = Crc32(Data, DataLen);
+	//printf("DataCrc32 = 0x%08x\n", DataCrc32);
+
+	DataWrite = (BYTE*)malloc(DataLen + sizeof(DataCrc32));
+	if (!DataWrite) {
+		rtn = -OTHER_ERROR;
+		goto out;
+	}
+
+
+	/* 將Crc32放到Data的最尾端 */
+	memcpy(DataWrite, Data, DataLen);
+	memcpy(DataWrite + DataLen, &DataCrc32, sizeof(DataCrc32));
+
+
+	/* 將資料寫入目標檔案內 */
+	sprintf((char*)FilePath, "%s:\\%s", MountPath, SETTING_FILE);
+
+	rtn = WriteToFile((const char*)FilePath, DataWrite, DataLen + sizeof(DataCrc32));
+	if (rtn != 0) {
+		rtn = -FILE_WRITE_FAILED;
+		goto out;
+	}
+
+out:
+	
+	if(DataWrite)	free(DataWrite);
+	
+	return rtn;
+}
+
+int SettingFileRead(BYTE* Data, DWORD DataLen, DWORD *RtnDataLen) {
+
+	if (Data == NULL || DataLen <= 0 || RtnDataLen == NULL)
+		return -PARAM_ERROR;
+
+	int rtn = 0;
+	BYTE MountPath[512] = { 0x00 };
+	BYTE FilePath[512] = { 0x00 };
+	DWORD FileSize = 0;
+	BYTE* DataRead = NULL;
+	uint32_t DataReadCrc32;
+	uint32_t DataCrc32;
+
+	rtn = DetectUSBStorage(MountPath);
+	if (rtn != 0) {
+		rtn = -USBDISK_NOT_FOUND;
+		goto out;
+	}
+
+	/* 取得檔案長度 */
+	sprintf((char*)FilePath, "%s:\\%s", MountPath, SETTING_FILE);
+
+	rtn = GetSettingFileSize((const char *)FilePath, &FileSize);
+	if (rtn != 0) {
+		rtn = -GET_FILESIZE_FAILED;
+		goto out;
+	}
+
+	if (FileSize <= 4) {
+		rtn = -FILESIZE_ERROR;
+		goto out;
+	}
+
+	/* 讀取出檔案內容，這裡的FileSize是檔案總長度，包含crc32的4bytes */
+	DataRead = (BYTE*)malloc(FileSize);
+	if (!DataRead) {
+		rtn = -OTHER_ERROR;
+		goto out;
+	}
+
+	rtn = ReadFromFile((const char *)FilePath, DataRead, FileSize);
+	if(rtn != 0) {
+		rtn = -FILE_READ_FAILED;
+		goto out;
+	}
+
+	if ((FileSize - sizeof(uint32_t)) > DataLen) {
+		rtn = -DATALEN_ERROR;
+		goto out;
+	}
+
+	/* 取得最後4bytes的crc32 */
+	memcpy(&DataReadCrc32, DataRead + FileSize - sizeof(uint32_t), sizeof(uint32_t));
+	
+	/* 計算扣除最後4bytes之後的crc32*/
+	DataCrc32 = Crc32(DataRead, FileSize - sizeof(uint32_t));
+
+	/* 比對crc32是否相同 */
+	if (DataCrc32 != DataReadCrc32) {
+		//printf("DataCrc32 = 0x%08x\n", DataCrc32);
+		//printf("DataReadCrc32 = 0x%08x\n", DataReadCrc32);
+		rtn = -CRC_COMPARE_FAILED;
+		goto out;
+	}
+
+	/* 將DataRead的內容放到Data裡面 */
+	memcpy(Data, DataRead, FileSize - sizeof(uint32_t));
+	*RtnDataLen = FileSize - sizeof(uint32_t);
+
+out:
+
+	if (DataRead) free(DataRead);
+	
+	return rtn;
+}
+
+int SettingFileGetLen(DWORD *DataLen) {
+	
+	if (DataLen == NULL)
+		return -PARAM_ERROR;
+
+	int rtn = 0;
+	BYTE MountPath[512] = { 0x00 };
+	BYTE FilePath[512] = { 0x00 };
+	DWORD FileSize = 0;
+
+	rtn = DetectUSBStorage(MountPath);
+	if (rtn != 0) {
+		rtn = -USBDISK_NOT_FOUND;
+		goto out;
+	}
+
+	/* 取得檔案長度 */
+	sprintf((char*)FilePath, "%s:\\%s", MountPath, SETTING_FILE);
+	rtn = GetSettingFileSize((const char *)FilePath, &FileSize);
+	if (rtn != 0) {
+		rtn = -GET_FILESIZE_FAILED;
+		goto out;
+	}
+
+	if (FileSize <= 4) {
+		rtn = -FILESIZE_ERROR;
+		goto out;
+	}
+
+	*DataLen = FileSize - sizeof(uint32_t);
+
+out :
+
+	return rtn;
+}
