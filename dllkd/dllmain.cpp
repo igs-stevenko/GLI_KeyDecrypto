@@ -25,7 +25,7 @@
 #pragma comment(lib, "setupapi.lib")
 
 #define CHUNK 4096
-#define KEYPATH R"(C:\Program Files (x86)\IGS\z.bin)"
+#define KEYPATH R"(X:\z.bin)"
 #define X_IMG_NAME "x.img"
 #define SETTING_FILE "Setting.bin"
 
